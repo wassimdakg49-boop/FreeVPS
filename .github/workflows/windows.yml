@@ -25,8 +25,7 @@ jobs:
         $ErrorActionPreference = 'Stop'
         $pw  = $Env:RDP_PASSWORD
         $sec = ConvertTo-SecureString $pw -AsPlainText -Force
-        $acct = New-LocalUser -Name 'rdpvm' -Password $sec -PasswordNeverExpires $true `
-                  -FullName 'Free VPS' -Description 'FreeVPS temporary RDP account'
+        $acct = New-LocalUser -Name 'rdpvm' -Password $sec -PasswordNeverExpires $true -FullName 'Free VPS' -Description 'FreeVPS temporary RDP account'
         Add-LocalGroupMember -Group 'Administrators' -Member 'rdpvm'
         Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'rdpvm'
         $acct | Select-Object Name, Enabled, PasswordExpires | Format-List
@@ -38,9 +37,8 @@ jobs:
         $ErrorActionPreference = 'Stop'
         .\ngrok\ngrok.exe version
         $env:NGROK_AUTHTOKEN = $Env:NGROK_AUTH_TOKEN
-        Start-Process .\ngrok\ngrok.exe `
-          -ArgumentList 'tcp','--region=us','--log=stdout','3389' `
-          -RedirectStandardOutput ngrok.log -WindowStyle Hidden
+        $ngrokArgs = 'tcp --region=us --log=stdout 3389'
+        Start-Process -FilePath .\ngrok\ngrok.exe -ArgumentList $ngrokArgs -RedirectStandardOutput ngrok.log -WindowStyle Hidden
 
         $url = $null
         for ($i = 0; $i -lt 30 -and -not $url; $i++) {
