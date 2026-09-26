@@ -14,11 +14,6 @@ jobs:
         Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
         Expand-Archive ngrok.zip
 
-    - name: Authenticate ngrok
-      run: .\ngrok\ngrok.exe config --authtoken $Env:NGROK_AUTH_TOKEN
-      env:
-        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
-
     - name: Enable Remote Desktop
       run: |
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
@@ -32,10 +27,14 @@ jobs:
         Set-LocalUser -Name 'vpsuser' -Password $sec -PasswordNeverExpires $true
         Add-LocalGroupMember -Group 'Administrators' -Member 'vpsuser'
         Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'vpsuser'
+      env:
+        RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
 
     - name: Open RDP tunnel
       run: |
         $ErrorActionPreference = 'Stop'
+        .\ngrok\ngrok.exe version
+        $env:NGROK_AUTHTOKEN = $Env:NGROK_AUTH_TOKEN
         Start-Process .\ngrok\ngrok.exe `
           -ArgumentList 'tcp','--region=us','--log=stdout','3389' `
           -RedirectStandardOutput ngrok.log -WindowStyle Hidden
@@ -87,6 +86,9 @@ jobs:
 
         Self-hosting builds of mstsc ignore ``/pth``; paste the host and port manually.
         "@ | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+      env:
+        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+        RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
 
     - name: Keep session alive
       run: |
