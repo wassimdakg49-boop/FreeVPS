@@ -33,74 +33,82 @@ jobs:
       env:
         RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
 
-    - name: Open RDP tunnel
+    - name: Run Windows VM
       run: |
         $ErrorActionPreference = 'Stop'
-        $proc = Start-Process -FilePath .\cloudflared.exe -ArgumentList 'tunnel','--url','tcp://localhost:3389','--no-autoupdate' -RedirectStandardOutput cf-out.log -RedirectStandardError cf-err.log -WindowStyle Hidden -PassThru
 
-        $rhost = $null
-        $rport = $null
-        for ($i = 0; $i -lt 45 -and -not $rhost; $i++) {
-          Start-Sleep -Seconds 2
+        function Start-Tunnel([int]$n) {
+          $out = "cf-$n.log"
+          $p = Start-Process -FilePath .\cloudflared.exe -ArgumentList 'tunnel','--url','tcp://localhost:3389','--no-autoupdate' -RedirectStandardOutput $out -RedirectStandardError "$out.err" -WindowStyle Hidden -PassThru
+          return [pscustomobject]@{ Proc = $p; Out = $out }
+        }
+
+        function Get-TunnelHost($t) {
           $txt = ''
-          foreach ($f in @('cf-out.log','cf-err.log')) {
+          foreach ($f in @($t.Out, ($t.Out + '.err'))) {
             if (Test-Path $f) { $txt += (Get-Content $f -Raw -ErrorAction SilentlyContinue) }
           }
           $m = [regex]::Match($txt, '(?:tcp|https?)://(?<h>[a-z0-9-]+\.trycloudflare\.com)(?::(?<p>\d+))?')
           if ($m.Success) {
-            $rhost = $m.Groups['h'].Value
-            $rport = if ($m.Groups['p'].Success) { $m.Groups['p'].Value } else { '3389' }
+            $port = '3389'
+            if ($m.Groups['p'].Success) { $port = $m.Groups['p'].Value }
+            return [pscustomobject]@{ Host = $m.Groups['h'].Value; Port = $port }
           }
-          if ($proc.HasExited -and -not $rhost) {
-            Get-Content cf-err.log -ErrorAction SilentlyContinue
-            throw "cloudflared exited early with code $($proc.ExitCode)"
-          }
+          return $null
         }
-        if (-not $rhost) { Get-Content cf-err.log -ErrorAction SilentlyContinue; throw 'tunnel did not report a hostname in 90s' }
 
-        $user = 'rdpvm'
-        $cred = $user + ':' + $Env:RDP_PASSWORD
-        $sha1 = [System.Security.Cryptography.SHA1]::Create()
-        $md5  = [System.Security.Cryptography.MD5]::Create()
-        $hex  = { param($b) ([System.BitConverter]::ToString($b)).Replace('-','').ToLower() }
-        $h1   = & $hex $md5.ComputeHash([System.Text.Encoding]::Unicode.GetBytes($cred))
-        $h2   = & $hex $sha1.ComputeHash([System.Text.Encoding]::Unicode.GetBytes('TERMSRV/' + $rhost))
-        $h3   = & $hex $md5.ComputeHash([System.Text.Encoding]::Unicode.GetBytes($rhost))
-        $full = & $hex $md5.ComputeHash([System.Text.Encoding]::Unicode.GetBytes($h1 + $h2 + $h3))
-        $b64  = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($full))
+        function Write-ConnectInfo([string]$h, [string]$port, [int]$attempt) {
+          $user = 'rdpvm'
+          $cred = $user + ':' + $Env:RDP_PASSWORD
+          $sha1 = [System.Security.Cryptography.SHA1]::Create()
+          $md5  = [System.Security.Cryptography.MD5]::Create()
+          $hex  = { param($b) ([System.BitConverter]::ToString($b)).Replace('-','').ToLower() }
+          $h1   = & $hex $md5.ComputeHash([Text.Encoding]::Unicode.GetBytes($cred))
+          $h2   = & $hex $sha1.ComputeHash([Text.Encoding]::Unicode.GetBytes('TERMSRV/' + $h))
+          $h3   = & $hex $md5.ComputeHash([Text.Encoding]::Unicode.GetBytes($h))
+          $full = & $hex $md5.ComputeHash([Text.Encoding]::Unicode.GetBytes($h1 + $h2 + $h3))
+          $b64  = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($full))
 
-        [ordered]@{ host = $rhost; port = $rport; user = $user; rdphash = $b64 } | ConvertTo-Json | Out-File -Encoding utf8 rdpinfo.json
-        Get-Content rdpinfo.json
+          $note = ''
+          if ($attempt -gt 1) { $note = "**Tunnel restarted (attempt $attempt). Any earlier address is dead.**`n" }
 
-        $lines = @(
-          '## Windows VM is live',
-          '',
-          'This job must stay running. Closing the browser tab does NOT stop it,',
-          'but the VM dies when the job ends or hits the 350 minute timeout.',
-          '',
-          ('- **User:** `' + $user + '`'),
-          ('- **Password:** the `RDP_PASSWORD` repository secret'),
-          ('- **Connect to:** `' + $rhost + ':' + $rport + '`'),
-          '',
-          'One-click from a Windows machine:',
-          '',
-          '```',
-          ('mstsc /v:' + $rhost + ':' + $rport + ' /u:' + $user + ' /pth:' + $b64),
-          '```',
-          '',
-          'If `/pth` is ignored, type the host and port in manually.'
-        )
-        $lines | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          @(
+            '## Windows VM is live', '', $note,
+            ('- **User:** `' + $user + '`'),
+            ('- **Password:** the `RDP_PASSWORD` repository secret'),
+            ('- **Connect to:** `' + $h + ':' + $port + '`'), '',
+            '```', ('mstsc /v:' + $h + ':' + $port + ' /u:' + $user + ' /pth:' + $b64), '```', '',
+            'If `/pth` is ignored, type the host and port in manually.'
+          ) | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+          Write-Host "CONNECT host=$h port=$port user=$user attempt=$attempt"
+          Write-Host "MSTSC mstsc /v:${h}:${port} /u:${user} /pth:${b64}"
+        }
+
+        $attempt = 0
+        while ($true) {
+          $attempt++
+          $t = Start-Tunnel $attempt
+
+          $info = $null
+          for ($i = 0; $i -lt 45 -and -not $info; $i++) {
+            Start-Sleep -Seconds 2
+            $info = Get-TunnelHost $t
+          }
+
+          if (-not $info) {
+            Write-Host "attempt ${attempt}: cloudflared never reported a hostname"
+            Get-Content ($t.Out + '.err') -ErrorAction SilentlyContinue | Write-Host
+            if ($attempt -ge 3) { throw 'tunnel failed to start 3 times in a row' }
+            continue
+          }
+
+          Write-ConnectInfo $info.Host $info.Port $attempt
+
+          while (-not $t.Proc.HasExited) { Start-Sleep -Seconds 30 }
+
+          Write-Host "tunnel process exited (code $($t.Proc.ExitCode)); restarting in 5s"
+          Start-Sleep -Seconds 5
+        }
       env:
         RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
-
-    - name: Keep session alive
-      run: |
-        $ErrorActionPreference = 'Stop'
-        while ($true) {
-          Start-Sleep -Seconds 60
-          if (-not (Get-Process cloudflared -ErrorAction SilentlyContinue)) {
-            Write-Host 'cloudflared died; restarting'
-            Start-Process -FilePath .\cloudflared.exe -ArgumentList 'tunnel','--url','tcp://localhost:3389','--no-autoupdate' -RedirectStandardOutput cf-out2.log -RedirectStandardError cf-err2.log -WindowStyle Hidden
-          }
-        }
