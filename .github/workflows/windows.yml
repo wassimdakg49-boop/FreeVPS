@@ -23,7 +23,8 @@ jobs:
     - name: Create RDP user
       run: |
         $ErrorActionPreference = 'Stop'
-        $acct = New-LocalUser -Name 'rdpvm' -Password $Env:RDP_PASSWORD -PasswordNeverExpires -AccountNeverExpires -FullName 'Free VPS' -Description 'FreeVPS temporary RDP account'
+        $sec = ConvertTo-SecureString $Env:RDP_PASSWORD -AsPlainText -Force
+        $acct = New-LocalUser -Name 'rdpvm' -Password $sec -PasswordNeverExpires -AccountNeverExpires -FullName 'Free VPS' -Description 'FreeVPS temporary RDP account'
         Add-LocalGroupMember -Group 'Administrators' -Member 'rdpvm'
         Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'rdpvm'
         $acct | Select-Object Name, Enabled, PasswordExpires, AccountExpires | Format-List
