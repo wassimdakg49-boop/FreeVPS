@@ -8,6 +8,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 350
 
+    permissions:
+      contents: write
+
     steps:
     - name: Download cloudflared
       run: |
@@ -83,6 +86,32 @@ jobs:
 
           Write-Host "CONNECT host=$h port=$port user=$user attempt=$attempt"
           Write-Host "MSTSC mstsc /v:${h}:${port} /u:${user} /pth:${b64}"
+
+          try {
+            $repo = $env:GITHUB_REPOSITORY
+            $payload = [ordered]@{
+              host = $h; port = $port; user = $user; attempt = $attempt
+              updated = (Get-Date).ToUniversalTime().ToString('o')
+              note = 'Read this file for the current tunnel address.'
+            } | ConvertTo-Json
+            $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
+
+            gh api "repos/$repo/git/refs/heads/live-status" 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+              $mainSha = (gh api "repos/$repo/git/ref/heads/main" --jq .object.sha).Trim()
+              gh api "repos/$repo/git/refs" --method POST -f ref="refs/heads/live-status" -f sha=$mainSha | Out-Null
+            }
+
+            $cur = gh api "repos/$repo/contents/live.json?ref=live-status" --jq .sha 2>$null
+            if ($cur) {
+              gh api "repos/$repo/contents/live.json" --method PUT -f message="live tunnel status" -f content=$b64 -f sha=$cur.Trim() -f branch=live-status | Out-Null
+            } else {
+              gh api "repos/$repo/contents/live.json" --method POST -f message="live tunnel status" -f content=$b64 -f branch=live-status | Out-Null
+            }
+            Write-Host 'published live.json to live-status branch'
+          } catch {
+            Write-Host "could not publish live.json: $($_.Exception.Message)"
+          }
         }
 
         $attempt = 0
