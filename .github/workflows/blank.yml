@@ -1,5 +1,5 @@
 name: Ubuntu ssh Virtual Machine
-on: 
+on:
   workflow_dispatch:
 defaults:
   run:

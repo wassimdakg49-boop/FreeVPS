@@ -1,0 +1,93 @@
+name: Windows RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 350
+
+    steps:
+    - name: Download ngrok
+      run: |
+        Invoke-WebRequest https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-windows-amd64.zip -OutFile ngrok.zip
+        Expand-Archive ngrok.zip
+
+    - name: Authenticate ngrok
+      run: .\ngrok\ngrok.exe config --authtoken $Env:NGROK_AUTH_TOKEN
+      env:
+        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+
+    - name: Enable Remote Desktop
+      run: |
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+    - name: Create RDP user
+      run: |
+        $pw  = $Env:RDP_PASSWORD
+        $sec = ConvertTo-SecureString $pw -AsPlainText -Force
+        Set-LocalUser -Name 'vpsuser' -Password $sec -PasswordNeverExpires $true
+        Add-LocalGroupMember -Group 'Administrators' -Member 'vpsuser'
+        Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'vpsuser'
+
+    - name: Open RDP tunnel
+      run: |
+        $ErrorActionPreference = 'Stop'
+        Start-Process .\ngrok\ngrok.exe `
+          -ArgumentList 'tcp','--region=us','--log=stdout','3389' `
+          -RedirectStandardOutput ngrok.log -WindowStyle Hidden
+
+        $url = $null
+        for ($i = 0; $i -lt 30 -and -not $url; $i++) {
+          Start-Sleep -Seconds 2
+          $m = Select-String -Path ngrok.log -Pattern 'url=(tcp://\S+)' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($m) { $url = $m.Matches[0].Groups[1].Value }
+        }
+        if (-not $url) { Get-Content ngrok.log; throw 'ngrok tunnel did not start' }
+
+        $addr  = $url -replace '^tcp://',''
+        $parts = $addr -split ':'
+        $rhost = $parts[0]
+        $rport = $parts[-1]
+
+        $user = 'vpsuser'
+        $cred = "$user" + ':' + $Env:RDP_PASSWORD
+        $sha1 = [System.Security.Cryptography.SHA1]::Create()
+        $md5  = [System.Security.Cryptography.MD5]::Create()
+        $hex  = { param($b) ([System.BitConverter]::ToString($b)).Replace('-','').ToLower() }
+        $h1   = & $hex $md5.ComputeHash([System.Text.Encoding]::Unicode.GetBytes($cred))
+        $h2   = & $hex $sha1.ComputeHash([System.Text.Encoding]::Unicode.GetBytes('TERMSRV/' + $rhost)).ToLower()
+        $h3   = & $hex $md5.ComputeHash([System.Text.Encoding]::Unicode.GetBytes($rhost)).ToLower()
+        $full = & $hex $md5.ComputeHash([System.Text.Encoding]::Unicode.GetBytes($h1 + $h2 + $h3))
+        $b64  = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($full))
+
+        $md = [ordered]@{
+          host = $rhost; port = $rport; user = $user; rdphash = $b64
+        }
+        $md | ConvertTo-Json | Out-File -Encoding utf8 rdpinfo.json
+        Get-Content rdpinfo.json
+
+        @"
+        ## Windows VM is live
+
+        Keep this tab open for the life of the session.
+
+        - **User:** ``$user``
+        - **Password:** the ``RDP_PASSWORD`` you set
+        - **Connect to:** ``$rhost``:``$rport``
+
+        One-click connect on Windows:
+
+        ```
+        mstsc /v:$rhost`:$rport /u:$user /pth:$b64
+        ```
+
+        Self-hosting builds of mstsc ignore ``/pth``; paste the host and port manually.
+        "@ | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+    - name: Keep session alive
+      run: |
+        while ($true) { Start-Sleep -Seconds 60 }
