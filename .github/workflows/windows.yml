@@ -9,13 +9,15 @@ jobs:
     timeout-minutes: 350
 
     steps:
-    - name: Download ngrok
+    - name: Download cloudflared
       run: |
-        Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
-        Expand-Archive ngrok.zip
+        $ErrorActionPreference = 'Stop'
+        Invoke-WebRequest https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -OutFile cloudflared.exe
+        .\cloudflared.exe --version
 
     - name: Enable Remote Desktop
       run: |
+        $ErrorActionPreference = 'Stop'
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
         Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
@@ -34,62 +36,71 @@ jobs:
     - name: Open RDP tunnel
       run: |
         $ErrorActionPreference = 'Stop'
-        .\ngrok\ngrok.exe version
-        $env:NGROK_AUTHTOKEN = $Env:NGROK_AUTH_TOKEN
-        $ngrokArgs = 'tcp --region=us --log=stdout 3389'
-        Start-Process -FilePath .\ngrok\ngrok.exe -ArgumentList $ngrokArgs -RedirectStandardOutput ngrok.log -WindowStyle Hidden
+        $proc = Start-Process -FilePath .\cloudflared.exe -ArgumentList 'tunnel','--url','tcp://localhost:3389','--no-autoupdate' -RedirectStandardOutput cf-out.log -RedirectStandardError cf-err.log -WindowStyle Hidden -PassThru
 
-        $url = $null
-        for ($i = 0; $i -lt 30 -and -not $url; $i++) {
+        $rhost = $null
+        $rport = $null
+        for ($i = 0; $i -lt 45 -and -not $rhost; $i++) {
           Start-Sleep -Seconds 2
-          $m = Select-String -Path ngrok.log -Pattern 'url=(tcp://\S+)' -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($m) { $url = $m.Matches[0].Groups[1].Value }
+          $txt = ''
+          foreach ($f in @('cf-out.log','cf-err.log')) {
+            if (Test-Path $f) { $txt += (Get-Content $f -Raw -ErrorAction SilentlyContinue) }
+          }
+          $m = [regex]::Match($txt, 'tcp://(?<h>[a-z0-9-]+\.trycloudflare\.com):(?<p>\d+)')
+          if ($m.Success) {
+            $rhost = $m.Groups['h'].Value
+            $rport = $m.Groups['p'].Value
+          }
+          if ($proc.HasExited -and -not $rhost) {
+            Get-Content cf-err.log -ErrorAction SilentlyContinue
+            throw "cloudflared exited early with code $($proc.ExitCode)"
+          }
         }
-        if (-not $url) { Get-Content ngrok.log; throw 'ngrok tunnel did not start' }
-
-        $addr  = $url -replace '^tcp://',''
-        $parts = $addr -split ':'
-        $rhost = $parts[0]
-        $rport = $parts[-1]
+        if (-not $rhost) { Get-Content cf-err.log -ErrorAction SilentlyContinue; throw 'tunnel did not report a hostname in 90s' }
 
         $user = 'rdpvm'
-        $cred = "$user" + ':' + $Env:RDP_PASSWORD
+        $cred = $user + ':' + $Env:RDP_PASSWORD
         $sha1 = [System.Security.Cryptography.SHA1]::Create()
         $md5  = [System.Security.Cryptography.MD5]::Create()
         $hex  = { param($b) ([System.BitConverter]::ToString($b)).Replace('-','').ToLower() }
         $h1   = & $hex $md5.ComputeHash([System.Text.Encoding]::Unicode.GetBytes($cred))
-        $h2   = & $hex $sha1.ComputeHash([System.Text.Encoding]::Unicode.GetBytes('TERMSRV/' + $rhost)).ToLower()
-        $h3   = & $hex $md5.ComputeHash([System.Text.Encoding]::Unicode.GetBytes($rhost)).ToLower()
+        $h2   = & $hex $sha1.ComputeHash([System.Text.Encoding]::Unicode.GetBytes('TERMSRV/' + $rhost))
+        $h3   = & $hex $md5.ComputeHash([System.Text.Encoding]::Unicode.GetBytes($rhost))
         $full = & $hex $md5.ComputeHash([System.Text.Encoding]::Unicode.GetBytes($h1 + $h2 + $h3))
         $b64  = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($full))
 
-        $md = [ordered]@{
-          host = $rhost; port = $rport; user = $user; rdphash = $b64
-        }
-        $md | ConvertTo-Json | Out-File -Encoding utf8 rdpinfo.json
+        [ordered]@{ host = $rhost; port = $rport; user = $user; rdphash = $b64 } | ConvertTo-Json | Out-File -Encoding utf8 rdpinfo.json
         Get-Content rdpinfo.json
 
-        @"
-        ## Windows VM is live
-
-        Keep this tab open for the life of the session.
-
-        - **User:** ``$user``
-        - **Password:** the ``RDP_PASSWORD`` you set
-        - **Connect to:** ``$rhost``:``$rport``
-
-        One-click connect on Windows:
-
-        ```
-        mstsc /v:$rhost`:$rport /u:$user /pth:$b64
-        ```
-
-        Self-hosting builds of mstsc ignore ``/pth``; paste the host and port manually.
-        "@ | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+        $lines = @(
+          '## Windows VM is live',
+          '',
+          'This job must stay running. Closing the browser tab does NOT stop it,',
+          'but the VM dies when the job ends or hits the 350 minute timeout.',
+          '',
+          ('- **User:** `' + $user + '`'),
+          ('- **Password:** the `RDP_PASSWORD` repository secret'),
+          ('- **Connect to:** `' + $rhost + ':' + $rport + '`'),
+          '',
+          'One-click from a Windows machine:',
+          '',
+          '```',
+          ('mstsc /v:' + $rhost + ':' + $rport + ' /u:' + $user + ' /pth:' + $b64),
+          '```',
+          '',
+          'If `/pth` is ignored, type the host and port in manually.'
+        )
+        $lines | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
       env:
-        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
         RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
 
     - name: Keep session alive
       run: |
-        while ($true) { Start-Sleep -Seconds 60 }
+        $ErrorActionPreference = 'Stop'
+        while ($true) {
+          Start-Sleep -Seconds 60
+          if (-not (Get-Process cloudflared -ErrorAction SilentlyContinue)) {
+            Write-Host 'cloudflared died; restarting'
+            Start-Process -FilePath .\cloudflared.exe -ArgumentList 'tunnel','--url','tcp://localhost:3389','--no-autoupdate' -RedirectStandardOutput cf-out2.log -RedirectStandardError cf-err2.log -WindowStyle Hidden
+          }
+        }
