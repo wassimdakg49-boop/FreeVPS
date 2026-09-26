@@ -22,11 +22,14 @@ jobs:
 
     - name: Create RDP user
       run: |
+        $ErrorActionPreference = 'Stop'
         $pw  = $Env:RDP_PASSWORD
         $sec = ConvertTo-SecureString $pw -AsPlainText -Force
-        Set-LocalUser -Name 'vpsuser' -Password $sec -PasswordNeverExpires $true
-        Add-LocalGroupMember -Group 'Administrators' -Member 'vpsuser'
-        Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'vpsuser'
+        $acct = New-LocalUser -Name 'rdpvm' -Password $sec -PasswordNeverExpires $true `
+                  -FullName 'Free VPS' -Description 'FreeVPS temporary RDP account'
+        Add-LocalGroupMember -Group 'Administrators' -Member 'rdpvm'
+        Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'rdpvm'
+        $acct | Select-Object Name, Enabled, PasswordExpires | Format-List
       env:
         RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
 
@@ -52,7 +55,7 @@ jobs:
         $rhost = $parts[0]
         $rport = $parts[-1]
 
-        $user = 'vpsuser'
+        $user = 'rdpvm'
         $cred = "$user" + ':' + $Env:RDP_PASSWORD
         $sha1 = [System.Security.Cryptography.SHA1]::Create()
         $md5  = [System.Security.Cryptography.MD5]::Create()
