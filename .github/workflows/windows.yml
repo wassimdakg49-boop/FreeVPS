@@ -46,10 +46,10 @@ jobs:
           foreach ($f in @('cf-out.log','cf-err.log')) {
             if (Test-Path $f) { $txt += (Get-Content $f -Raw -ErrorAction SilentlyContinue) }
           }
-          $m = [regex]::Match($txt, 'tcp://(?<h>[a-z0-9-]+\.trycloudflare\.com):(?<p>\d+)')
+          $m = [regex]::Match($txt, '(?:tcp|https?)://(?<h>[a-z0-9-]+\.trycloudflare\.com)(?::(?<p>\d+))?')
           if ($m.Success) {
             $rhost = $m.Groups['h'].Value
-            $rport = $m.Groups['p'].Value
+            $rport = if ($m.Groups['p'].Success) { $m.Groups['p'].Value } else { '3389' }
           }
           if ($proc.HasExited -and -not $rhost) {
             Get-Content cf-err.log -ErrorAction SilentlyContinue
